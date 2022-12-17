@@ -201,7 +201,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
 }
 
 static struct pingpong_dest *pp_client_exch_dest(const char *servername, int port,
-                                                 const struct pingpong_dest *my_dest, struct ibv_mr *mr)
+                                                 const struct pingpong_dest *my_dest, struct ibv_mr *mr, struct ibv_mr *remote_mr)
 {
     struct addrinfo *res, *t;
     struct addrinfo hints = {
@@ -276,7 +276,7 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
                                                  int ib_port, enum ibv_mtu mtu,
                                                  int port, int sl,
                                                  const struct pingpong_dest *my_dest,
-                                                 int sgid_idx, struct ibv_mr *mr)
+                                                 int sgid_idx, struct ibv_mr *mr, struct ibv_mr *remote_mr)
 {
     struct addrinfo *res, *t;
     struct addrinfo hints = {
@@ -851,9 +851,9 @@ int main(int argc, char *argv[])
 
 
     if (servername)
-        rem_dest = pp_client_exch_dest(servername, port, &my_dest, ctx->mr);
+        rem_dest = pp_client_exch_dest(servername, port, &my_dest, ctx->mr, &ctx->remote_mr);
     else
-        rem_dest = pp_server_exch_dest(ctx, ib_port, mtu, port, sl, &my_dest, gidx, ctx->mr);
+        rem_dest = pp_server_exch_dest(ctx, ib_port, mtu, port, sl, &my_dest, gidx, ctx->mr, &ctx->remote_mr);
 
     if (!rem_dest)
         return 1;
