@@ -30,6 +30,7 @@
  * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+#define _GNU_SOURCE
 
 #include <assert.h>
 #include <stdio.h>
@@ -47,12 +48,13 @@
 #include <time.h>
 
 #include <infiniband/verbs.h>
-
 #define WC_BATCH (10)
 
 enum {
     PINGPONG_RECV_WRID = 1,
     PINGPONG_SEND_WRID = 2,
+    PINGPONG_READ_WRID = 3,
+    PINGPONG_WRITE_WRID = 4,
 };
 
 static int page_size;
@@ -63,6 +65,12 @@ struct pingpong_context {
     struct ibv_comp_channel	*channel;
     struct ibv_pd		*pd;
     struct ibv_mr		*mr;
+
+    struct ibv_mr *remote_mr;
+    struct ibv_mr peer_mr;
+    char *rdma_local_region;
+    char *rdma_remote_region;
+ 
     struct ibv_cq		*cq;
     struct ibv_qp		*qp;
     void			*buf;
@@ -70,6 +78,12 @@ struct pingpong_context {
     int				rx_depth;
     int				routs;
     struct ibv_port_attr	portinfo;
+};
+
+
+struct connection {
+  struct rdma_cm_id *id;
+  int connected;
 };
 
 struct pingpong_dest {
@@ -187,7 +201,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
 }
 
 static struct pingpong_dest *pp_client_exch_dest(const char *servername, int port,
-                                                 const struct pingpong_dest *my_dest)
+                                                 const struct pingpong_dest *my_dest, struct ibv_mr *mr)
 {
     struct addrinfo *res, *t;
     struct addrinfo hints = {
@@ -195,7 +209,7 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
             .ai_socktype = SOCK_STREAM
     };
     char *service;
-    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
+    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000:00000000000000000000000000000000:0000000000000000000000000000000000000000000000000000000000000000:00000000000000000000000000000000"];
     int n;
     int sockfd = -1;
     struct pingpong_dest *rem_dest = NULL;
@@ -231,7 +245,8 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     }
 
     gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
+    sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
+    // sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
     if (write(sockfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
         goto out;
@@ -261,7 +276,7 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
                                                  int ib_port, enum ibv_mtu mtu,
                                                  int port, int sl,
                                                  const struct pingpong_dest *my_dest,
-                                                 int sgid_idx)
+                                                 int sgid_idx, struct ibv_mr *mr)
 {
     struct addrinfo *res, *t;
     struct addrinfo hints = {
@@ -270,7 +285,7 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
             .ai_socktype = SOCK_STREAM
     };
     char *service;
-    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000"];
+    char msg[sizeof "0000:000000:000000:00000000000000000000000000000000:00000000000000000000000000000000:0000000000000000000000000000000000000000000000000000000000000000:00000000000000000000000000000000"];
     int n;
     int sockfd = -1, connfd;
     struct pingpong_dest *rem_dest = NULL;
@@ -328,7 +343,7 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     if (!rem_dest)
         goto out;
 
-    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
+    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid); //rr
     wire_gid_to_gid(gid, &rem_dest->gid);
 
     if (pp_connect_ctx(ctx, ib_port, my_dest->psn, mtu, sl, rem_dest, sgid_idx)) {
@@ -338,9 +353,8 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
         goto out;
     }
 
-
     gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
+    sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
     if (write(connfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
         free(rem_dest);
@@ -401,7 +415,8 @@ static struct pingpong_context *pp_init_ctx(struct ibv_device *ib_dev, int size,
         return NULL;
     }
 
-    ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_LOCAL_WRITE);
+    ctx->mr = ibv_reg_mr(ctx->pd, ctx->buf, size, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ);
+
     if (!ctx->mr) {
         fprintf(stderr, "Couldn't register MR\n");
         return NULL;
@@ -611,6 +626,51 @@ static void usage(const char *argv0)
     printf("  -g, --gid-idx=<gid index> local port gid index\n");
 }
 
+// /////////========> added
+// static int pp_post_read(struct pingpong_context *ctx, int n)
+// {
+//     struct ibv_sge list = {
+//             .addr	= (uint64_t)ctx->buf,
+//             .length = ctx->size,
+//             .lkey	= ctx->mr->lkey
+//     };
+
+//     struct ibv_send_wr *bad_wr, wr = {
+//             .wr_id	    = PINGPONG_READ_WRID,
+//             .sg_list    = &list,
+//             .num_sge    = 1,
+//             .opcode     = IBV_WR_RDMA_READ ,
+//             .send_flags = IBV_SEND_SIGNALED,
+//             .next       = NULL
+//     };
+
+//     return ibv_post_send(ctx->qp, &wr, &bad_wr);
+// }
+
+// static int pp_post_write(struct pingpong_context *ctx)
+// {
+//     struct ibv_sge list = {
+//             .addr	= (uint64_t)ctx->buf,
+//             .length = ctx->size,
+//             .lkey	= ctx->mr->lkey
+//     };
+
+//     struct ibv_send_wr *bad_wr, wr = {
+//             .wr_id	    = PINGPONG_WRITE_WRID,
+//             .sg_list    = &list,
+//             .num_sge    = 1,
+//             .opcode     = IBV_WR_RDMA_WRITE,
+//             .send_flags = IBV_SEND_SIGNALED,
+//                     //   rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
+//             . = ctx->mr->rkey
+
+//             .wr.rdma.remote_addr = remote_address,
+//             .wr.rdma.rkey = remote_key,
+//             .next       = NULL
+//     };
+
+//     return ibv_post_send(ctx->qp, &wr, &bad_wr);
+// }
 int main(int argc, char *argv[])
 {
     struct ibv_device      **dev_list;
@@ -791,9 +851,9 @@ int main(int argc, char *argv[])
 
 
     if (servername)
-        rem_dest = pp_client_exch_dest(servername, port, &my_dest);
+        rem_dest = pp_client_exch_dest(servername, port, &my_dest, ctx->mr);
     else
-        rem_dest = pp_server_exch_dest(ctx, ib_port, mtu, port, sl, &my_dest, gidx);
+        rem_dest = pp_server_exch_dest(ctx, ib_port, mtu, port, sl, &my_dest, gidx, ctx->mr);
 
     if (!rem_dest)
         return 1;
