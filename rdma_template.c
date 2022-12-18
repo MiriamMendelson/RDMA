@@ -201,7 +201,7 @@ static int pp_connect_ctx(struct pingpong_context *ctx, int port, int my_psn,
 }
 
 static struct pingpong_dest *pp_client_exch_dest(const char *servername, int port,
-                                                 const struct pingpong_dest *my_dest, struct ibv_mr *mr, struct ibv_mr *remote_mr)
+                                                 const struct pingpong_dest *my_dest, struct ibv_mr *mr, struct ibv_mr **remote_mr)
 {
     struct addrinfo *res, *t;
     struct addrinfo hints = {
@@ -214,6 +214,7 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     int sockfd = -1;
     struct pingpong_dest *rem_dest = NULL;
     char gid[33];
+    struct ibv_mr* rem_mr = NULL;
 
     if (asprintf(&service, "%d", port) < 0)
         return NULL;
@@ -246,6 +247,8 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
 
     gid_to_wire_gid(&my_dest->gid, gid);
     sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
+    printf("sending my buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
+
     // sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
     if (write(sockfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
@@ -264,7 +267,15 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     if (!rem_dest)
         goto out;
 
-    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
+    rem_mr = (struct ibv_mr* )malloc(sizeof (struct ibv_mr));
+    if (!rem_mr)
+        goto out;
+    printf("-> %s\n", msg);
+    rem_mr->rkey = 3;
+    sscanf(msg, "%x:%x:%x:%s:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid, &rem_mr->addr, &rem_mr->length, &rem_mr->rkey); 
+    printf("getting rem buff addr: %p, buff size: %zu, rkey: %u\n", rem_mr->addr, rem_mr->length, rem_mr->rkey);
+    *remote_mr = rem_mr;
+    // sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
     wire_gid_to_gid(gid, &rem_dest->gid);
 
     out:
@@ -276,7 +287,7 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
                                                  int ib_port, enum ibv_mtu mtu,
                                                  int port, int sl,
                                                  const struct pingpong_dest *my_dest,
-                                                 int sgid_idx, struct ibv_mr *mr, struct ibv_mr *remote_mr)
+                                                 int sgid_idx, struct ibv_mr *mr, struct ibv_mr **remote_mr)
 {
     struct addrinfo *res, *t;
     struct addrinfo hints = {
@@ -342,8 +353,14 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     rem_dest = malloc(sizeof *rem_dest);
     if (!rem_dest)
         goto out;
+        
+    *remote_mr = malloc(sizeof (struct ibv_mr));
+    if (!*remote_mr)
+        goto out;
 
-    sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid); //rr
+    sscanf(msg, "%x:%x:%x:%s:%p:%zu:%u", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid, (*remote_mr)->addr, (*remote_mr)->length, (*remote_mr)->rkey); //rr
+    printf("getting rem buff addr: %p, buff size: %zu, rkey: %u\n", (*remote_mr)->addr, (*remote_mr)->length, (*remote_mr)->rkey);
+
     wire_gid_to_gid(gid, &rem_dest->gid);
 
     if (pp_connect_ctx(ctx, ib_port, my_dest->psn, mtu, sl, rem_dest, sgid_idx)) {
@@ -355,6 +372,8 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
 
     gid_to_wire_gid(&my_dest->gid, gid);
     sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
+    printf("sending my buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
+
     if (write(connfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
         free(rem_dest);
@@ -859,8 +878,8 @@ int main(int argc, char *argv[])
         return 1;
 
     inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s\n",
-           rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
+    // printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s. rem buff addr: %p, rem buff size: %zu, rem rkey: %u\n",
+    //        rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid, ctx->remote_mr->addr, ctx->remote_mr->length, ctx->remote_mr->rkey);
 
     if (servername)
         if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest, gidx))
