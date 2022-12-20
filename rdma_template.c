@@ -31,7 +31,6 @@
  * SOFTWARE.
  */
 #define _GNU_SOURCE
-
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,8 +46,12 @@
 #include <netdb.h>
 #include <time.h>
 
+
 #include <infiniband/verbs.h>
 #define WC_BATCH (10)
+#define PACKAGES (100)
+#define FOR_NANO_SECONDS (2000000)
+#define FOR_NANO_SECONDS_W (1000000)
 
 enum {
     PINGPONG_RECV_WRID = 1,
@@ -104,6 +107,12 @@ enum ibv_mtu pp_mtu_to_enum(int mtu)
     default:   return -1;
     }
 }
+static int pp_post_write(struct pingpong_context *ctx);
+static int pp_post_read(struct pingpong_context *ctx);
+int write_latency(struct pingpong_context *ctx);
+int read_latency(struct pingpong_context *ctx);
+int send_latency(struct pingpong_context *ctx);
+
 
 uint16_t pp_get_local_lid(struct ibv_context *context, int port)
 {
@@ -246,8 +255,11 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     }
 
     gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
-    printf("sending my buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
+    //c to server
+    // sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
+    sprintf(msg, "%04x:%06x:%06x:%u:%p:%zu:%s", my_dest->lid, my_dest->qpn, my_dest->psn,  mr->rkey, mr->addr, mr->length,gid);
+   
+    printf("sending my(client) buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
 
     // sprintf(msg, "%04x:%06x:%06x:%s", my_dest->lid, my_dest->qpn, my_dest->psn, gid);
     if (write(sockfd, msg, sizeof msg) != sizeof msg) {
@@ -270,11 +282,16 @@ static struct pingpong_dest *pp_client_exch_dest(const char *servername, int por
     rem_mr = (struct ibv_mr* )malloc(sizeof (struct ibv_mr));
     if (!rem_mr)
         goto out;
-    printf("-> %s\n", msg);
-    rem_mr->rkey = 3;
-    sscanf(msg, "%x:%x:%x:%s:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid, &rem_mr->addr, &rem_mr->length, &rem_mr->rkey); 
-    printf("getting rem buff addr: %p, buff size: %zu, rkey: %u\n", rem_mr->addr, rem_mr->length, rem_mr->rkey);
+   sscanf(msg, "%x:%x:%x:%p:%x:%u:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, &rem_mr->addr, &rem_mr->length, &rem_mr->rkey, gid); 
+
+//    sscanf(msg, "%x:%x:%x:%s:%x:%x:%x", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid, &rem_mr->addr, &rem_mr->length, &rem_mr->rkey); 
+    //sscanf(msg, "%x:%x:%x:%s:%x", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid, &rem_mr->addr); 
+   
+    //printf("getting rem(server) buff addr: %p, buff size: %zu, rkey: %u\n", rem_mr->addr, rem_mr->length, rem_mr->rkey);
+    //printf("msg from server=  %s\n", msg);
     *remote_mr = rem_mr;
+    printf("getting rem(server) buff addr: %p, buff size: %zu, rkey: %u\n", (*remote_mr)->addr, (*remote_mr)->length,(*remote_mr)->rkey);
+    
     // sscanf(msg, "%x:%x:%x:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid);
     wire_gid_to_gid(gid, &rem_dest->gid);
 
@@ -301,6 +318,8 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     int sockfd = -1, connfd;
     struct pingpong_dest *rem_dest = NULL;
     char gid[33];
+    struct ibv_mr* rem_mr = NULL;
+
 
     if (asprintf(&service, "%d", port) < 0)
         return NULL;
@@ -354,13 +373,18 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     if (!rem_dest)
         goto out;
         
-    *remote_mr = malloc(sizeof (struct ibv_mr));
-    if (!*remote_mr)
+    // *remote_mr =(struct ibv_mr* ) malloc(sizeof (struct ibv_mr));
+    // if (!*remote_mr)
+    //     goto out;
+    rem_mr = (struct ibv_mr* )malloc(sizeof (struct ibv_mr));
+    if (!rem_mr)
         goto out;
+    //printf("msg from client = %s\n", msg);
 
-    sscanf(msg, "%x:%x:%x:%s:%p:%zu:%u", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, gid, (*remote_mr)->addr, (*remote_mr)->length, (*remote_mr)->rkey); //rr
-    printf("getting rem buff addr: %p, buff size: %zu, rkey: %u\n", (*remote_mr)->addr, (*remote_mr)->length, (*remote_mr)->rkey);
-
+    sscanf(msg, "%x:%x:%x:%u:%p:%zu:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, &rem_mr->rkey, &rem_mr->addr, &rem_mr->length,  gid); //rr
+    //sscanf(msg, "%x:%x:%x:%u:%p:%zu:%s", &rem_dest->lid, &rem_dest->qpn, &rem_dest->psn, (*remote_mr)->rkey, (*remote_mr)->addr, (*remote_mr)->length, gid); //rr
+    *remote_mr = rem_mr;
+    printf("getting rem(client) buff addr: %p, buff size: %zu, rkey: %u\n", (*remote_mr)->addr,  (*remote_mr)->length,  (*remote_mr)->rkey);
     wire_gid_to_gid(gid, &rem_dest->gid);
 
     if (pp_connect_ctx(ctx, ib_port, my_dest->psn, mtu, sl, rem_dest, sgid_idx)) {
@@ -371,8 +395,12 @@ static struct pingpong_dest *pp_server_exch_dest(struct pingpong_context *ctx,
     }
 
     gid_to_wire_gid(&my_dest->gid, gid);
-    sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
-    printf("sending my buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
+    // sprintf(msg, "%04x:%06x:%06x:%s:%p:%zu:%u", my_dest->lid, my_dest->qpn, my_dest->psn, gid, mr->addr, mr->length, mr->rkey);
+    sprintf(msg, "%04x:%06x:%06x:%p:%u:%zu:%s", my_dest->lid, my_dest->qpn, my_dest->psn, mr->addr, mr->length, mr->rkey, gid);
+
+    //printf("sending my (server) buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
+
+    printf("sending my (server) buff addr: %p, buff size: %zu, rkey: %u\n", mr->addr, mr->length, mr->rkey);
 
     if (write(connfd, msg, sizeof msg) != sizeof msg) {
         fprintf(stderr, "Couldn't send local address\n");
@@ -577,6 +605,7 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters)
 {
     int rcnt = 0, scnt = 0;
     while (rcnt + scnt < iters) {
+        // printf("rcnt = %d , scnt = %d, iters = %d\n ",rcnt , scnt ,iters );
         struct ibv_wc wc[WC_BATCH];
         int ne, i;
 
@@ -586,23 +615,34 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters)
                 fprintf(stderr, "poll CQ failed %d\n", ne);
                 return 1;
             }
-
         } while (ne < 1);
-
         for (i = 0; i < ne; ++i) {
+            //  printf("inforrrr, ne = %d\n", ne);
             if (wc[i].status != IBV_WC_SUCCESS) {
                 fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
                         ibv_wc_status_str(wc[i].status),
                         wc[i].status, (int) wc[i].wr_id);
                 return 1;
             }
-
             switch ((int) wc[i].wr_id) {
+            case PINGPONG_WRITE_WRID:
+                //printf("-->w\n");
+                ++scnt;
+                break;
+            case PINGPONG_READ_WRID:
+                //printf("-->r\n");
+                ++rcnt;
+                break;
+
             case PINGPONG_SEND_WRID:
+                 //printf("-->s\n");
                 ++scnt;
                 break;
 
             case PINGPONG_RECV_WRID:
+                //printf("<--recv\n");
+
+                // printf("READ\n");
                 if (--ctx->routs <= 10) {
                     ctx->routs += pp_post_recv(ctx, ctx->rx_depth - ctx->routs);
                     if (ctx->routs < ctx->rx_depth) {
@@ -621,11 +661,96 @@ int pp_wait_completions(struct pingpong_context *ctx, int iters)
                 return 1;
             }
         }
+        // printf("after for\n");
 
     }
     return 0;
 }
+int pp_wait_send_completion(struct pingpong_context *ctx)
+{
+    int scnt = 0;
+    while (scnt  < 1) {
+        struct ibv_wc wc[WC_BATCH];
+        int ne, i;
 
+        do {
+            ne = ibv_poll_cq(ctx->cq, WC_BATCH, wc);
+            if (ne < 0) {
+                fprintf(stderr, "poll CQ failed %d\n", ne);
+                return 1;
+            }
+        } while (ne < 1);
+        for (i = 0; i < ne; ++i) {
+            if (wc[i].status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+                        ibv_wc_status_str(wc[i].status),
+                        wc[i].status, (int) wc[i].wr_id);
+                return 1;
+            }
+            if(((int) wc[i].wr_id) == PINGPONG_SEND_WRID ){
+                ++scnt;
+            }
+        }
+    }
+    return 0;
+}
+int pp_wait_write_completion(struct pingpong_context *ctx)
+{
+    int wcnt = 0;
+    while (wcnt  < 1) {
+        struct ibv_wc wc[WC_BATCH];
+        int ne, i;
+
+        do {
+            ne = ibv_poll_cq(ctx->cq, WC_BATCH, wc);
+            if (ne < 0) {
+                fprintf(stderr, "poll CQ failed %d\n", ne);
+                return 1;
+            }
+        } while (ne < 1);
+        for (i = 0; i < ne; ++i) {
+            if (wc[i].status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+                        ibv_wc_status_str(wc[i].status),
+                        wc[i].status, (int) wc[i].wr_id);
+                return 1;
+            }
+            if(((int) wc[i].wr_id) == PINGPONG_WRITE_WRID ){
+                ++wcnt;
+            }
+        }
+    }
+    return 0;
+}
+int pp_wait_read_completion(struct pingpong_context *ctx)
+{
+    int rcnt = 0;
+    while (rcnt < 1) {
+        struct ibv_wc wc[WC_BATCH];
+        int ne, i;
+
+        do {
+            ne = ibv_poll_cq(ctx->cq, WC_BATCH, wc);
+            if (ne < 0) {
+                fprintf(stderr, "poll CQ failed %d\n", ne);
+                return 1;
+            }
+        } while (ne < 1);
+        
+        for (i = 0; i < ne; ++i) {
+            if (wc[i].status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "Failed status %s (%d) for wr_id %d\n",
+                        ibv_wc_status_str(wc[i].status),
+                        wc[i].status, (int) wc[i].wr_id);
+                return 1;
+            }
+            if(((int) wc[i].wr_id) == PINGPONG_READ_WRID){
+                ++rcnt;
+            }
+        }
+    }
+    return 0;
+}
 static void usage(const char *argv0)
 {
     printf("Usage:\n");
@@ -646,50 +771,50 @@ static void usage(const char *argv0)
 }
 
 // /////////========> added
-// static int pp_post_read(struct pingpong_context *ctx, int n)
-// {
-//     struct ibv_sge list = {
-//             .addr	= (uint64_t)ctx->buf,
-//             .length = ctx->size,
-//             .lkey	= ctx->mr->lkey
-//     };
+static int pp_post_read(struct pingpong_context *ctx)
+{
+    struct ibv_sge list = {
+            .addr	= (uint64_t)ctx->buf,
+            .length = ctx->size,
+            .lkey	= ctx->mr->lkey
+    };
 
-//     struct ibv_send_wr *bad_wr, wr = {
-//             .wr_id	    = PINGPONG_READ_WRID,
-//             .sg_list    = &list,
-//             .num_sge    = 1,
-//             .opcode     = IBV_WR_RDMA_READ ,
-//             .send_flags = IBV_SEND_SIGNALED,
-//             .next       = NULL
-//     };
+    struct ibv_send_wr *bad_wr, wr = {
+            .wr_id	    = PINGPONG_READ_WRID,
+            .sg_list    = &list,
+            .num_sge    = 1,
+            .opcode     = IBV_WR_RDMA_READ  ,
+            .send_flags = IBV_SEND_SIGNALED,
+            .wr.rdma.remote_addr = (uintptr_t)((ctx->remote_mr)->addr)/*+offset*/,
+            .wr.rdma.rkey = (ctx->remote_mr)->rkey,
+            .next       = NULL
+    };
+    return ibv_post_send(ctx->qp, &wr, &bad_wr);
+}
+int offset = 0;
+static int pp_post_write(struct pingpong_context *ctx)
+{
+    struct ibv_sge list = {
+            .addr	= (uint64_t)ctx->buf,
+            .length = ctx->size,
+            .lkey	= ctx->mr->lkey
+    };
 
-//     return ibv_post_send(ctx->qp, &wr, &bad_wr);
-// }
+    struct ibv_send_wr *bad_wr, wr = {
+            .wr_id	    = PINGPONG_WRITE_WRID,
+            .sg_list    = &list,
+            .num_sge    = 1,
+            .opcode     = IBV_WR_RDMA_WRITE_WITH_IMM ,//m
+            .send_flags = IBV_SEND_SIGNALED,
+            .wr.rdma.remote_addr = (uintptr_t)((ctx->remote_mr)->addr)/*+offset*/,
+            .wr.rdma.rkey = (ctx->remote_mr)->rkey,
+            .next       = NULL
+    };
+    //printf("+offset = %d\n",offset);
+   // offset += list.length;
+    return ibv_post_send(ctx->qp, &wr, &bad_wr);
+}
 
-// static int pp_post_write(struct pingpong_context *ctx)
-// {
-//     struct ibv_sge list = {
-//             .addr	= (uint64_t)ctx->buf,
-//             .length = ctx->size,
-//             .lkey	= ctx->mr->lkey
-//     };
-
-//     struct ibv_send_wr *bad_wr, wr = {
-//             .wr_id	    = PINGPONG_WRITE_WRID,
-//             .sg_list    = &list,
-//             .num_sge    = 1,
-//             .opcode     = IBV_WR_RDMA_WRITE,
-//             .send_flags = IBV_SEND_SIGNALED,
-//                     //   rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid);
-//             . = ctx->mr->rkey
-
-//             .wr.rdma.remote_addr = remote_address,
-//             .wr.rdma.rkey = remote_key,
-//             .next       = NULL
-//     };
-
-//     return ibv_post_send(ctx->qp, &wr, &bad_wr);
-// }
 int main(int argc, char *argv[])
 {
     struct ibv_device      **dev_list;
@@ -825,12 +950,15 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
-
+    rx_depth = 2000;
+    tx_depth = 2000;
     ctx = pp_init_ctx(ib_dev, size, rx_depth, tx_depth, ib_port, use_event, !servername);
     if (!ctx)
         return 1;
-
+    printf("ctx->routs = %d. ctx->rx_depth= %d\n", ctx->routs, ctx->rx_depth);
     ctx->routs = pp_post_recv(ctx, ctx->rx_depth);
+    printf("ctx->routs = %d. ctx->rx_depth= %d\n", ctx->routs, ctx->rx_depth);
+
     if (ctx->routs < ctx->rx_depth) {
         fprintf(stderr, "Couldn't post receive (%d)\n", ctx->routs);
         return 1;
@@ -876,10 +1004,10 @@ int main(int argc, char *argv[])
 
     if (!rem_dest)
         return 1;
-
+    printf("%p, %ld\n",(ctx->remote_mr)->addr,(ctx->remote_mr)->addr);
     inet_ntop(AF_INET6, &rem_dest->gid, gid, sizeof gid);
-    // printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s. rem buff addr: %p, rem buff size: %zu, rem rkey: %u\n",
-    //        rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid, ctx->remote_mr->addr, ctx->remote_mr->length, ctx->remote_mr->rkey);
+    printf("  remote address: LID 0x%04x, QPN 0x%06x, PSN 0x%06x, GID %s. rem buff addr: %p, rem buff size: %zu, rem rkey: %u\n",
+           rem_dest->lid, rem_dest->qpn, rem_dest->psn, gid, ctx->remote_mr->addr, ctx->remote_mr->length, ctx->remote_mr->rkey);
 
     if (servername)
         if (pp_connect_ctx(ctx, ib_port, my_dest.psn, mtu, sl, rem_dest, gidx))
@@ -891,22 +1019,145 @@ int main(int argc, char *argv[])
             if ((i != 0) && (i % tx_depth == 0)) {
                 pp_wait_completions(ctx, tx_depth);
             }
-            if (pp_post_send(ctx)) {
+            if (pp_post_write(ctx)) {//to ch
                 fprintf(stderr, "Client ouldn't post send\n");
                 return 1;
             }
+           
         }
         printf("Client Done.\n");
+        //empty qp
+        struct ibv_wc wc[200];
+        int ne = 0;
+         do {
+            ne = ibv_poll_cq(ctx->cq, 200, wc);
+            if (ne < 0) {
+                fprintf(stderr, "poll CQ failed %d\n", ne);
+                return 1;
+            }
+        } while (ne > 0);
+        send_latency(ctx);
+        write_latency(ctx);
+        read_latency(ctx);
     } else {
-        if (pp_post_send(ctx)) {
+        if (pp_post_write(ctx)) {
             fprintf(stderr, "Server couldn't post send\n");
             return 1;
         }
+        printf("iters = %d\n", iters);
         pp_wait_completions(ctx, iters);
         printf("Server Done.\n");
+        sleep(100);
     }
-
     ibv_free_device_list(dev_list);
     free(rem_dest);
     return 0;
+}
+
+int send_latency(struct pingpong_context *ctx) {
+    offset = 0;
+    struct  timeval send_time;
+    struct  timeval recv_time;
+    double latency;
+    double avg = 0;
+    int i = 0;
+    for( i = 0 ; i < PACKAGES ; i++){
+         if (pp_post_send(ctx)) {
+                fprintf(stderr, "Client ouldn't post write\n");
+                return 1;
+            }
+        //Time of write
+        if(gettimeofday(&send_time, NULL)==-1){
+            perror("gettimeofday");
+            exit(1);
+        }
+        
+        if (pp_wait_send_completion(ctx)){
+            fprintf(stderr, "can't get completion\n");
+                return 1;
+        }
+
+        //Time of recving
+        if(gettimeofday(&recv_time, NULL)==-1){
+            perror("gettimeofday");
+            exit(1);
+        }
+
+        //get the latency for current packet
+        latency = (double) (recv_time.tv_usec - send_time.tv_usec)/FOR_NANO_SECONDS;
+        //sum of all latency so far
+        avg+= latency;
+    }
+    printf("send latency  = %f\n", avg/i);
+}
+int write_latency(struct pingpong_context *ctx) {
+    offset = 0;
+    struct  timeval send_time;
+    struct  timeval recv_time;
+    double latency;
+    double avg = 0;
+    int i = 0;
+    for( i = 0 ; i < PACKAGES ; i++){
+         if (pp_post_write(ctx)) {
+                fprintf(stderr, "Client ouldn't post write\n");
+                return 1;
+            }
+        //Time of write
+        if(gettimeofday(&send_time, NULL)==-1){
+            perror("gettimeofday");
+            exit(1);
+        }
+        
+        if (pp_wait_write_completion(ctx)){
+            fprintf(stderr, "can't get completion\n");
+                return 1;
+        }
+
+        //Time of recving
+        if(gettimeofday(&recv_time, NULL)==-1){
+            perror("gettimeofday");
+            exit(1);
+        }
+
+        //get the latency for current packet
+        latency = (double) (recv_time.tv_usec - send_time.tv_usec)/FOR_NANO_SECONDS;
+        //sum of all latency so far
+        avg+= latency;
+    }
+    printf("write latency  = %f\n", avg/i);
+}
+
+int read_latency(struct pingpong_context *ctx) {
+    struct  timeval send_time;
+    struct  timeval recv_time;
+    double latency;
+    double avg = 0;
+    int i = 0;
+    for( i = 0 ; i < PACKAGES ; i++){
+         if (pp_post_read(ctx)) {
+                fprintf(stderr, "Client couldn't post write\n");
+                return 1;
+            }
+        //Time of read
+        if(gettimeofday(&send_time, NULL)==-1){
+            perror("gettimeofday");
+            exit(1);
+        }
+        if (pp_wait_read_completion(ctx)){
+            fprintf(stderr, "can't get completion\n");
+                return 1;
+        }
+        //Time of recving
+        if(gettimeofday(&recv_time, NULL)==-1){
+            perror("gettimeofday");
+            exit(1);
+        }
+
+        //get the latency for current packet
+        latency = (double) (recv_time.tv_usec - send_time.tv_usec)/FOR_NANO_SECONDS;
+           
+        //sum of all latency so far
+        avg+= latency;
+    }
+    printf("read latency  = %f\n", avg/i);
 }
